@@ -1,26 +1,23 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { GameView } from "@/components/GameView";
 
 export const Route = createFileRoute("/")({
   component: Index,
+  head: () => ({
+    meta: [
+      { title: "Orb Drop — Physics Merge Puzzle" },
+      { name: "description", content: "A cozy physics-based merge puzzle. Drop, merge, chain combos, and beat your high score." },
+      { property: "og:title", content: "Orb Drop — Physics Merge Puzzle" },
+      { property: "og:description", content: "Drop, merge, and chain combos in this satisfying physics puzzle." },
+    ],
+  }),
 });
 
-// IMPORTANT: Replace this placeholder. For sites with multiple pages (About, Services, Contact, etc.),
-// create separate route files (about.tsx, services.tsx, contact.tsx) — don't put all pages in this file.
-function PlaceholderIndex() {
-  return (
-    <div
-      className="flex min-h-screen items-center justify-center"
-      style={{ backgroundColor: "#fcfbf8" }}
-    >
-      <img
-        data-lovable-blank-page-placeholder="REMOVE_THIS"
-        src="https://cdn.gpteng.co/blank-app-v1.svg"
-        alt="Your app will live here!"
-      />
-    </div>
-  );
-}
-
 function Index() {
-  return <PlaceholderIndex />;
+  return (
+    <main className="min-h-screen w-full">
+      <h1 className="sr-only">Orb Drop — Physics Merge Puzzle Game</h1>
+      <GameView />
+    </main>
+  );
 }
