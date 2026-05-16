@@ -110,12 +110,12 @@ export class MergeGame {
   }
   private addWalls() {
     const t = this.wallThickness;
-    const opts: Matter.IBodyDefinition = {
+    const opts = {
       isStatic: true,
       friction: 0.6,
       restitution: 0.1,
       render: { visible: false },
-    };
+    } satisfies Matter.IChamferableBodyDefinition;
     const floor = Matter.Bodies.rectangle(this.width / 2, this.height + t / 2 - 2, this.width, t, opts);
     const left = Matter.Bodies.rectangle(-t / 2 + 2, this.height / 2, t, this.height * 2, opts);
     const right = Matter.Bodies.rectangle(this.width + t / 2 - 2, this.height / 2, t, this.height * 2, opts);
