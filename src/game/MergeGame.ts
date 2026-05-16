@@ -1,5 +1,12 @@
 import Matter from "matter-js";
-import { FRUITS, MAX_LEVEL, SPAWNABLE_MAX_LEVEL, type FruitDef } from "./fruits";
+import {
+  CHARACTERS,
+  MAX_LEVEL,
+  SPAWNABLE_MAX_LEVEL,
+  getCharacterImage,
+  preloadCharacterImages,
+  type CharacterStage,
+} from "./characters";
 import { playBounce, playDrop, playMerge, playCombo, playGameOver } from "./audio";
 
 export interface GameCallbacks {
@@ -8,13 +15,14 @@ export interface GameCallbacks {
   onGameOver: (score: number) => void;
   onCombo: (n: number) => void;
   onShake: () => void;
+  onMergePopup?: (text: string) => void;
 }
 
 interface Popup { x: number; y: number; text: string; life: number; color: string; vy: number }
 interface Particle { x: number; y: number; vx: number; vy: number; life: number; max: number; color: string; r: number }
 
-interface FruitBody extends Matter.Body {
-  fruitLevel: number;
+interface CharacterBody extends Matter.Body {
+  characterLevel: number;
   merged?: boolean;
   spawnTime: number;
 }
@@ -47,7 +55,7 @@ export class MergeGame {
   private shakeAmount = 0;
   private flash = 0;
 
-  private overLineSince = new WeakMap<FruitBody, number>();
+  private overLineSince = new WeakMap<CharacterBody, number>();
   private rafId = 0;
   private lastTime = 0;
 
@@ -56,6 +64,8 @@ export class MergeGame {
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("no 2d ctx");
     this.ctx = ctx;
+
+    preloadCharacterImages();
 
     this.engine = Matter.Engine.create({
       gravity: { x: 0, y: 1, scale: 0.0014 },
@@ -76,8 +86,7 @@ export class MergeGame {
   }
 
   private rollNewLevel() {
-    // Weighted toward small fruits.
-    const weights = [40, 30, 18, 8, 4];
+    const weights = [42, 30, 18, 10];
     const total = weights.reduce((a, b) => a + b, 0);
     let r = Math.random() * total;
     for (let i = 0; i <= SPAWNABLE_MAX_LEVEL; i++) {
@@ -125,51 +134,51 @@ export class MergeGame {
 
   setDropX(x: number) {
     if (this.gameOver) return;
-    const def = FRUITS[this.currentLevel];
+    const def = CHARACTERS[this.currentLevel];
     const margin = def.radius + 4;
     this.dropX = Math.max(margin, Math.min(this.width - margin, x));
   }
 
   drop() {
     if (!this.canDrop || this.gameOver || this.paused) return;
-    const def = FRUITS[this.currentLevel];
-    const body = this.makeFruit(this.dropX, this.topLine - def.radius - 10, this.currentLevel);
+    const def = CHARACTERS[this.currentLevel];
+    const body = this.makeCharacter(this.dropX, this.topLine - def.radius - 10, this.currentLevel);
     Matter.World.add(this.world, body);
     playDrop();
     this.canDrop = false;
-    this.dropCooldown = 0.45; // seconds
+    this.dropCooldown = 0.45;
     this.currentLevel = this.nextLevel;
     this.nextLevel = this.rollNewLevel();
     this.cb.onNext(this.nextLevel);
   }
 
-  private makeFruit(x: number, y: number, level: number): FruitBody {
-    const def = FRUITS[level];
+  private makeCharacter(x: number, y: number, level: number): CharacterBody {
+    const def = CHARACTERS[level];
     const body = Matter.Bodies.circle(x, y, def.radius, {
       restitution: 0.18,
       friction: 0.35,
       frictionStatic: 0.6,
       frictionAir: 0.005,
-      density: 0.001 + level * 0.0003,
+      density: def.mass,
       slop: 0.02,
       sleepThreshold: 60,
-    }) as FruitBody;
-    body.fruitLevel = level;
+    }) as CharacterBody;
+    body.characterLevel = level;
     body.spawnTime = performance.now();
     return body;
   }
 
   private onCollision(event: Matter.IEventCollision<Matter.Engine>) {
     for (const pair of event.pairs) {
-      const a = pair.bodyA as FruitBody;
-      const b = pair.bodyB as FruitBody;
+      const a = pair.bodyA as CharacterBody;
+      const b = pair.bodyB as CharacterBody;
       const speed = Math.hypot(a.velocity.x - b.velocity.x, a.velocity.y - b.velocity.y);
-      if (a.fruitLevel != null && b.fruitLevel != null) {
+      if (a.characterLevel != null && b.characterLevel != null) {
         if (speed > 1.5) playBounce(speed / 4);
-        if (!a.merged && !b.merged && a.fruitLevel === b.fruitLevel && a.fruitLevel < MAX_LEVEL) {
+        if (!a.merged && !b.merged && a.characterLevel === b.characterLevel && a.characterLevel < MAX_LEVEL) {
           a.merged = true;
           b.merged = true;
-          this.mergeFruits(a, b);
+          this.mergeCharacters(a, b);
         }
       } else if (speed > 2) {
         playBounce(speed / 5);
@@ -177,23 +186,21 @@ export class MergeGame {
     }
   }
 
-  private mergeFruits(a: FruitBody, b: FruitBody) {
-    const newLevel = a.fruitLevel + 1;
+  private mergeCharacters(a: CharacterBody, b: CharacterBody) {
+    const newLevel = a.characterLevel + 1;
     const mx = (a.position.x + b.position.x) / 2;
     const my = (a.position.y + b.position.y) / 2;
     Matter.World.remove(this.world, a);
     Matter.World.remove(this.world, b);
 
-    const isMax = newLevel >= MAX_LEVEL;
+    const isMax = newLevel > MAX_LEVEL;
     if (!isMax) {
-      const nb = this.makeFruit(mx, my, newLevel);
-      // Slight upward pop so chains feel snappy.
+      const nb = this.makeCharacter(mx, my, newLevel);
       Matter.Body.setVelocity(nb, { x: 0, y: -1.5 });
       Matter.World.add(this.world, nb);
     }
 
-    const def = FRUITS[Math.min(newLevel, MAX_LEVEL)];
-    // Chain combo
+    const def = CHARACTERS[Math.min(newLevel, MAX_LEVEL)];
     this.mergeChainTimer = 0.6;
     this.mergeChainCount += 1;
     const combo = this.mergeChainCount;
@@ -207,13 +214,20 @@ export class MergeGame {
     this.cb.onScore(this.score);
 
     playMerge(newLevel);
-    this.spawnParticles(mx, my, def.color, 18 + newLevel * 2);
+    this.spawnParticles(mx, my, def.color, 18 + newLevel * 3);
     this.popups.push({
-      x: mx, y: my, text: `+${gained}${combo > 1 ? ` x${combo}` : ""}`,
-      life: 1, color: def.shadow, vy: -0.6,
+      x: mx, y: my - def.radius - 6,
+      text: `${def.name} 합체!`,
+      life: 1.1, color: def.shadow, vy: -0.6,
     });
-    this.flash = Math.min(1, this.flash + 0.15);
-    this.shakeAmount = Math.min(8, this.shakeAmount + 1 + newLevel * 0.4);
+    this.popups.push({
+      x: mx, y: my,
+      text: `+${gained}${combo > 1 ? ` x${combo}` : ""}`,
+      life: 0.9, color: def.color, vy: -0.5,
+    });
+    this.cb.onMergePopup?.(`${def.name} 합체!`);
+    this.flash = Math.min(1, this.flash + 0.18);
+    this.shakeAmount = Math.min(10, this.shakeAmount + 1.2 + newLevel * 0.5);
     this.cb.onShake();
   }
 
@@ -273,7 +287,6 @@ export class MergeGame {
       if (this.mergeChainTimer <= 0) this.mergeChainCount = 0;
     }
 
-    // Particles
     for (const p of this.particles) {
       p.x += p.vx; p.y += p.vy; p.vy += 0.15; p.vx *= 0.99; p.life -= dt;
     }
@@ -287,15 +300,14 @@ export class MergeGame {
     this.shakeAmount *= 0.85;
     this.flash *= 0.9;
 
-    // Game over check: any fruit above the line for > 1s
     if (!this.gameOver) {
       const now = performance.now();
       const bodies = Matter.Composite.allBodies(this.world);
       for (const body of bodies) {
-        const fb = body as FruitBody;
-        if (fb.fruitLevel == null) continue;
-        if (now - fb.spawnTime < 1500) continue; // grace
-        if (fb.position.y - FRUITS[fb.fruitLevel].radius < this.topLine) {
+        const fb = body as CharacterBody;
+        if (fb.characterLevel == null) continue;
+        if (now - fb.spawnTime < 1500) continue;
+        if (fb.position.y - CHARACTERS[fb.characterLevel].radius < this.topLine) {
           const t0 = this.overLineSince.get(fb) ?? now;
           this.overLineSince.set(fb, t0);
           if (now - t0 > 1100) {
@@ -316,42 +328,55 @@ export class MergeGame {
     this.cb.onGameOver(this.score);
   }
 
-  private drawFruit(body: FruitBody) {
-    const def: FruitDef = FRUITS[body.fruitLevel];
-    const { x, y } = body.position;
+  private drawCharacter(level: number, x: number, y: number, angle: number) {
+    const def: CharacterStage = CHARACTERS[level];
     const r = def.radius;
-    const angle = body.angle;
-
     const ctx = this.ctx;
     ctx.save();
     ctx.translate(x, y);
-    // shadow
+
+    // 그림자
     ctx.beginPath();
-    ctx.fillStyle = "rgba(0,0,0,0.18)";
+    ctx.fillStyle = "rgba(0,0,0,0.28)";
     ctx.ellipse(2, 3, r, r, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // body gradient
-    const grad = ctx.createRadialGradient(-r * 0.3, -r * 0.4, r * 0.1, 0, 0, r);
-    grad.addColorStop(0, def.highlight);
-    grad.addColorStop(0.6, def.color);
-    grad.addColorStop(1, def.shadow);
-    ctx.beginPath();
-    ctx.fillStyle = grad;
-    ctx.arc(0, 0, r, 0, Math.PI * 2);
-    ctx.fill();
-
-    // outline
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = "rgba(0,0,0,0.18)";
-    ctx.stroke();
-
-    // rotating highlight dot to show spin
-    ctx.rotate(angle);
-    ctx.beginPath();
-    ctx.fillStyle = "rgba(255,255,255,0.7)";
-    ctx.ellipse(-r * 0.4, -r * 0.45, r * 0.22, r * 0.14, -0.3, 0, Math.PI * 2);
-    ctx.fill();
+    const img = getCharacterImage(def.imagePath);
+    if (img) {
+      // 원형 클립 후 이미지
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.closePath();
+      ctx.clip();
+      ctx.rotate(angle);
+      ctx.drawImage(img, -r, -r, r * 2, r * 2);
+      ctx.restore();
+      // 외곽
+      ctx.beginPath();
+      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "rgba(255,255,255,0.6)";
+      ctx.stroke();
+    } else {
+      // 색상 fallback
+      const grad = ctx.createRadialGradient(-r * 0.3, -r * 0.4, r * 0.1, 0, 0, r);
+      grad.addColorStop(0, def.highlight);
+      grad.addColorStop(0.6, def.color);
+      grad.addColorStop(1, def.shadow);
+      ctx.beginPath();
+      ctx.fillStyle = grad;
+      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = "rgba(255,255,255,0.25)";
+      ctx.stroke();
+      ctx.rotate(angle);
+      ctx.beginPath();
+      ctx.fillStyle = "rgba(255,255,255,0.75)";
+      ctx.ellipse(-r * 0.4, -r * 0.45, r * 0.22, r * 0.14, -0.3, 0, Math.PI * 2);
+      ctx.fill();
+    }
     ctx.restore();
   }
 
@@ -366,8 +391,8 @@ export class MergeGame {
     ctx.translate(sx, sy);
     ctx.clearRect(-20, -20, this.width + 40, this.height + 40);
 
-    // Container background panel
-    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    // 우주 느낌 컨테이너 패널
+    ctx.fillStyle = "rgba(255,255,255,0.06)";
     ctx.beginPath();
     const r = 18;
     const x = 4, y = this.topLine - 6, w = this.width - 8, h = this.height - this.topLine + 2;
@@ -380,9 +405,9 @@ export class MergeGame {
     ctx.quadraticCurveTo(x, y, x + r, y);
     ctx.fill();
 
-    // Danger line
+    // 위험선
     ctx.setLineDash([8, 6]);
-    ctx.strokeStyle = "rgba(220, 60, 60, 0.55)";
+    ctx.strokeStyle = "rgba(255, 120, 180, 0.55)";
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(8, this.topLine);
@@ -390,31 +415,29 @@ export class MergeGame {
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // Drop guide
+    // 드롭 가이드
     if (!this.gameOver && this.canDrop) {
-      const def = FRUITS[this.currentLevel];
-      ctx.strokeStyle = "rgba(0,0,0,0.15)";
+      const def = CHARACTERS[this.currentLevel];
+      ctx.strokeStyle = "rgba(255,255,255,0.18)";
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(this.dropX, this.topLine);
       ctx.lineTo(this.dropX, this.height - 4);
       ctx.stroke();
-      // Preview ghost
       ctx.globalAlpha = 0.85;
-      const ghost = { fruitLevel: this.currentLevel, position: { x: this.dropX, y: this.topLine - def.radius - 8 }, angle: 0 } as unknown as FruitBody;
-      this.drawFruit(ghost);
+      this.drawCharacter(this.currentLevel, this.dropX, this.topLine - def.radius - 8, 0);
       ctx.globalAlpha = 1;
     }
 
-    // Fruits
+    // 캐릭터
     const bodies = Matter.Composite.allBodies(this.world);
     for (const b of bodies) {
-      const fb = b as FruitBody;
-      if (fb.fruitLevel == null) continue;
-      this.drawFruit(fb);
+      const fb = b as CharacterBody;
+      if (fb.characterLevel == null) continue;
+      this.drawCharacter(fb.characterLevel, fb.position.x, fb.position.y, fb.angle);
     }
 
-    // Particles
+    // 파티클
     for (const p of this.particles) {
       ctx.globalAlpha = Math.max(0, p.life / p.max);
       ctx.fillStyle = p.color;
@@ -424,19 +447,21 @@ export class MergeGame {
     }
     ctx.globalAlpha = 1;
 
-    // Popups
+    // 팝업
     for (const p of this.popups) {
       ctx.globalAlpha = Math.max(0, p.life);
       ctx.fillStyle = p.color;
-      ctx.font = "bold 20px system-ui, sans-serif";
+      ctx.font = "bold 18px system-ui, sans-serif";
       ctx.textAlign = "center";
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = "rgba(0,0,0,0.55)";
+      ctx.strokeText(p.text, p.x, p.y);
       ctx.fillText(p.text, p.x, p.y);
     }
     ctx.globalAlpha = 1;
 
-    // Flash
     if (this.flash > 0.01) {
-      ctx.fillStyle = `rgba(255,255,255,${this.flash * 0.35})`;
+      ctx.fillStyle = `rgba(255,255,255,${this.flash * 0.3})`;
       ctx.fillRect(0, 0, this.width, this.height);
     }
 
