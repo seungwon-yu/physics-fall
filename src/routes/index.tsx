@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { GameView } from "@/components/GameView";
+import { GitHubSyncBadge } from "@/components/GitHubSyncBadge";
 
 export const Route = createFileRoute("/")({
   component: Index,
@@ -17,6 +18,7 @@ function Index() {
   return (
     <main className="min-h-screen w-full">
       <h1 className="sr-only">캐릭터 합체 퍼즐 게임</h1>
+      <GitHubSyncBadge />
       <GameView />
     </main>
   );
