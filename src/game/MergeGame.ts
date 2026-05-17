@@ -159,17 +159,20 @@ export class MergeGame {
 
   private makeCharacter(x: number, y: number, level: number): CharacterBody {
     const def = CHARACTERS[level];
+    // 안정성: 낮은 반발, 높은 마찰, 적당한 공기저항, 부드러운 slop
     const body = Matter.Bodies.circle(x, y, def.radius, {
-      restitution: 0.18,
-      friction: 0.35,
-      frictionStatic: 0.6,
-      frictionAir: 0.005,
-      density: def.mass,
-      slop: 0.02,
-      sleepThreshold: 60,
+      restitution: 0.12,
+      friction: 0.75,
+      frictionStatic: 0.9,
+      frictionAir: 0.018,
+      // density 증가량을 완화하여 큰 객체가 작은 객체를 과하게 짓누르지 않도록
+      density: 0.0012 + level * 0.00015,
+      slop: 0.05,
+      sleepThreshold: 50,
     }) as CharacterBody;
     body.characterLevel = level;
     body.spawnTime = performance.now();
+    body.landed = false;
     return body;
   }
 
