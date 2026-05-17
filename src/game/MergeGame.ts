@@ -372,7 +372,19 @@ export class MergeGame {
   }
 
   private triggerGameOver() {
+    if (this.gameOverTriggered) return;
+    this.gameOverTriggered = true;
     this.gameOver = true;
+    this.canDrop = false;
+    // 모든 캐릭터 body 정지 + 물리 일시정지
+    const bodies = Matter.Composite.allBodies(this.world);
+    for (const body of bodies) {
+      const fb = body as CharacterBody;
+      if (fb.characterLevel == null) continue;
+      Matter.Body.setVelocity(fb, { x: 0, y: 0 });
+      Matter.Body.setAngularVelocity(fb, 0);
+    }
+    Matter.Runner.stop(this.runner);
     playGameOver();
     this.shakeAmount = 12;
     this.cb.onGameOver(this.score);
