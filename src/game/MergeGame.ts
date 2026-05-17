@@ -25,7 +25,11 @@ interface CharacterBody extends Matter.Body {
   characterLevel: number;
   merged?: boolean;
   spawnTime: number;
+  landed?: boolean;
 }
+
+const MAX_LINEAR_SPEED = 14;
+const MAX_ANGULAR_SPEED = 0.4;
 
 export class MergeGame {
   private engine: Matter.Engine;
