@@ -49,6 +49,7 @@ export class MergeGame {
   private canDrop = true;
   private dropCooldown = 0;
   private gameOver = false;
+  private gameOverTriggered = false;
   private paused = false;
   private score = 0;
   private mergeChainTimer = 0;
@@ -59,7 +60,6 @@ export class MergeGame {
   private shakeAmount = 0;
   private flash = 0;
 
-  private overLineSince = new WeakMap<CharacterBody, number>();
   private rafId = 0;
   private lastTime = 0;
 
