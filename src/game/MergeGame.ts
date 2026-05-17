@@ -177,10 +177,14 @@ export class MergeGame {
   }
 
   private onCollision(event: Matter.IEventCollision<Matter.Engine>) {
+    if (this.gameOver) return;
     for (const pair of event.pairs) {
       const a = pair.bodyA as CharacterBody;
       const b = pair.bodyB as CharacterBody;
       const speed = Math.hypot(a.velocity.x - b.velocity.x, a.velocity.y - b.velocity.y);
+      // 첫 충돌 시점에 landed 표시 → 게임오버 판정 대상이 됨
+      if (a.characterLevel != null) a.landed = true;
+      if (b.characterLevel != null) b.landed = true;
       if (a.characterLevel != null && b.characterLevel != null) {
         if (speed > 1.5) playBounce(speed / 4);
         if (!a.merged && !b.merged && a.characterLevel === b.characterLevel && a.characterLevel < MAX_LEVEL) {
