@@ -25,7 +25,11 @@ interface CharacterBody extends Matter.Body {
   characterLevel: number;
   merged?: boolean;
   spawnTime: number;
+  landed?: boolean;
 }
+
+const MAX_LINEAR_SPEED = 14;
+const MAX_ANGULAR_SPEED = 0.4;
 
 export class MergeGame {
   private engine: Matter.Engine;
@@ -45,6 +49,7 @@ export class MergeGame {
   private canDrop = true;
   private dropCooldown = 0;
   private gameOver = false;
+  private gameOverTriggered = false;
   private paused = false;
   private score = 0;
   private mergeChainTimer = 0;
@@ -55,7 +60,6 @@ export class MergeGame {
   private shakeAmount = 0;
   private flash = 0;
 
-  private overLineSince = new WeakMap<CharacterBody, number>();
   private rafId = 0;
   private lastTime = 0;
 
@@ -81,6 +85,7 @@ export class MergeGame {
     this.cb.onNext(this.nextLevel);
 
     Matter.Events.on(this.engine, "collisionStart", (e) => this.onCollision(e));
+    Matter.Events.on(this.engine, "afterUpdate", () => this.afterPhysicsUpdate());
     Matter.Runner.run(this.runner, this.engine);
     this.loop(performance.now());
   }
@@ -154,25 +159,32 @@ export class MergeGame {
 
   private makeCharacter(x: number, y: number, level: number): CharacterBody {
     const def = CHARACTERS[level];
+    // 안정성: 낮은 반발, 높은 마찰, 적당한 공기저항, 부드러운 slop
     const body = Matter.Bodies.circle(x, y, def.radius, {
-      restitution: 0.18,
-      friction: 0.35,
-      frictionStatic: 0.6,
-      frictionAir: 0.005,
-      density: def.mass,
-      slop: 0.02,
-      sleepThreshold: 60,
+      restitution: 0.12,
+      friction: 0.75,
+      frictionStatic: 0.9,
+      frictionAir: 0.018,
+      // density 증가량을 완화하여 큰 객체가 작은 객체를 과하게 짓누르지 않도록
+      density: 0.0012 + level * 0.00015,
+      slop: 0.05,
+      sleepThreshold: 50,
     }) as CharacterBody;
     body.characterLevel = level;
     body.spawnTime = performance.now();
+    body.landed = false;
     return body;
   }
 
   private onCollision(event: Matter.IEventCollision<Matter.Engine>) {
+    if (this.gameOver) return;
     for (const pair of event.pairs) {
       const a = pair.bodyA as CharacterBody;
       const b = pair.bodyB as CharacterBody;
       const speed = Math.hypot(a.velocity.x - b.velocity.x, a.velocity.y - b.velocity.y);
+      // 첫 충돌 시점에 landed 표시 → 게임오버 판정 대상이 됨
+      if (a.characterLevel != null) a.landed = true;
+      if (b.characterLevel != null) b.landed = true;
       if (a.characterLevel != null && b.characterLevel != null) {
         if (speed > 1.5) playBounce(speed / 4);
         if (!a.merged && !b.merged && a.characterLevel === b.characterLevel && a.characterLevel < MAX_LEVEL) {
@@ -187,16 +199,26 @@ export class MergeGame {
   }
 
   private mergeCharacters(a: CharacterBody, b: CharacterBody) {
+    if (this.gameOver) return;
     const newLevel = a.characterLevel + 1;
     const mx = (a.position.x + b.position.x) / 2;
     const my = (a.position.y + b.position.y) / 2;
+    // 병합 직전 평균 속도의 일부만 계승하여 튐 억제
+    const avgVx = (a.velocity.x + b.velocity.x) * 0.5 * 0.25;
+    const avgVy = (a.velocity.y + b.velocity.y) * 0.5 * 0.25;
     Matter.World.remove(this.world, a);
     Matter.World.remove(this.world, b);
 
     const isMax = newLevel > MAX_LEVEL;
     if (!isMax) {
       const nb = this.makeCharacter(mx, my, newLevel);
-      Matter.Body.setVelocity(nb, { x: 0, y: -1.5 });
+      // 살짝 위로 통통 + 평균속도 일부 반영, 최대치 제한
+      const vx = Math.max(-3, Math.min(3, avgVx));
+      const vy = Math.max(-3, Math.min(1, avgVy - 1.2));
+      Matter.Body.setVelocity(nb, { x: vx, y: vy });
+      Matter.Body.setAngularVelocity(nb, 0);
+      // 갓 생성된 병합 body는 즉시 landed 처리 (이미 충돌 위치이므로)
+      nb.landed = true;
       Matter.World.add(this.world, nb);
     }
 
@@ -261,10 +283,12 @@ export class MergeGame {
     this.engine = Matter.Engine.create({ gravity: { x: 0, y: 1, scale: 0.0014 }, enableSleeping: true });
     this.world = this.engine.world;
     Matter.Events.on(this.engine, "collisionStart", (e) => this.onCollision(e));
+    Matter.Events.on(this.engine, "afterUpdate", () => this.afterPhysicsUpdate());
     Matter.Runner.run(this.runner, this.engine);
     this.addWalls();
     this.score = 0;
     this.gameOver = false;
+    this.gameOverTriggered = false;
     this.particles = [];
     this.popups = [];
     this.mergeChainCount = 0;
@@ -277,7 +301,53 @@ export class MergeGame {
     this.cb.onNext(this.nextLevel);
   }
 
+  // Matter afterUpdate: 매 물리 스텝마다 게임오버 판정 + 속도 클램프
+  private afterPhysicsUpdate() {
+    if (this.gameOverTriggered) return;
+    const bodies = Matter.Composite.allBodies(this.world);
+    for (const body of bodies) {
+      const fb = body as CharacterBody;
+      if (fb.characterLevel == null) continue;
+
+      // 1) 속도/각속도 클램프로 jitter 및 과한 튐 억제
+      const vx = fb.velocity.x;
+      const vy = fb.velocity.y;
+      const sp = Math.hypot(vx, vy);
+      if (sp > MAX_LINEAR_SPEED) {
+        const k = MAX_LINEAR_SPEED / sp;
+        Matter.Body.setVelocity(fb, { x: vx * k, y: vy * k });
+      }
+      const av = fb.angularVelocity;
+      if (Math.abs(av) > MAX_ANGULAR_SPEED) {
+        Matter.Body.setAngularVelocity(fb, Math.sign(av) * MAX_ANGULAR_SPEED);
+      }
+
+      // 2) 게임오버 판정: 착지(landed)된 활성 body만 검사,
+      //    bounds.min.y(콜라이더 상단) 기준 즉시 종료
+      if (!fb.landed) continue;
+      if (fb.bounds.min.y <= this.topLine) {
+        this.triggerGameOver();
+        return;
+      }
+    }
+  }
+
   private update(dt: number) {
+    if (this.gameOver) {
+      // 게임오버 후에는 점수/콤보/드롭 타이머 갱신 없이 시각 효과만 감쇠
+      for (const p of this.particles) {
+        p.x += p.vx; p.y += p.vy; p.vy += 0.15; p.vx *= 0.99; p.life -= dt;
+      }
+      this.particles = this.particles.filter((p) => p.life > 0);
+      for (const p of this.popups) {
+        p.y += p.vy; p.vy *= 0.96; p.life -= dt * 1.2;
+      }
+      this.popups = this.popups.filter((p) => p.life > 0);
+      this.shakeAmount *= 0.85;
+      this.flash *= 0.9;
+      return;
+    }
+
     if (this.dropCooldown > 0) {
       this.dropCooldown -= dt;
       if (this.dropCooldown <= 0) this.canDrop = true;
@@ -299,30 +369,22 @@ export class MergeGame {
 
     this.shakeAmount *= 0.85;
     this.flash *= 0.9;
-
-    if (!this.gameOver) {
-      const now = performance.now();
-      const bodies = Matter.Composite.allBodies(this.world);
-      for (const body of bodies) {
-        const fb = body as CharacterBody;
-        if (fb.characterLevel == null) continue;
-        if (now - fb.spawnTime < 1500) continue;
-        if (fb.position.y - CHARACTERS[fb.characterLevel].radius < this.topLine) {
-          const t0 = this.overLineSince.get(fb) ?? now;
-          this.overLineSince.set(fb, t0);
-          if (now - t0 > 1100) {
-            this.triggerGameOver();
-            break;
-          }
-        } else {
-          this.overLineSince.delete(fb);
-        }
-      }
-    }
   }
 
   private triggerGameOver() {
+    if (this.gameOverTriggered) return;
+    this.gameOverTriggered = true;
     this.gameOver = true;
+    this.canDrop = false;
+    // 모든 캐릭터 body 정지 + 물리 일시정지
+    const bodies = Matter.Composite.allBodies(this.world);
+    for (const body of bodies) {
+      const fb = body as CharacterBody;
+      if (fb.characterLevel == null) continue;
+      Matter.Body.setVelocity(fb, { x: 0, y: 0 });
+      Matter.Body.setAngularVelocity(fb, 0);
+    }
+    Matter.Runner.stop(this.runner);
     playGameOver();
     this.shakeAmount = 12;
     this.cb.onGameOver(this.score);
