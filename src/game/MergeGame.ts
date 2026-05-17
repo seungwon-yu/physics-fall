@@ -85,6 +85,7 @@ export class MergeGame {
     this.cb.onNext(this.nextLevel);
 
     Matter.Events.on(this.engine, "collisionStart", (e) => this.onCollision(e));
+    Matter.Events.on(this.engine, "afterUpdate", () => this.afterPhysicsUpdate());
     Matter.Runner.run(this.runner, this.engine);
     this.loop(performance.now());
   }
