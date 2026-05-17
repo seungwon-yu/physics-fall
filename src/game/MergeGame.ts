@@ -199,16 +199,26 @@ export class MergeGame {
   }
 
   private mergeCharacters(a: CharacterBody, b: CharacterBody) {
+    if (this.gameOver) return;
     const newLevel = a.characterLevel + 1;
     const mx = (a.position.x + b.position.x) / 2;
     const my = (a.position.y + b.position.y) / 2;
+    // 병합 직전 평균 속도의 일부만 계승하여 튐 억제
+    const avgVx = (a.velocity.x + b.velocity.x) * 0.5 * 0.25;
+    const avgVy = (a.velocity.y + b.velocity.y) * 0.5 * 0.25;
     Matter.World.remove(this.world, a);
     Matter.World.remove(this.world, b);
 
     const isMax = newLevel > MAX_LEVEL;
     if (!isMax) {
       const nb = this.makeCharacter(mx, my, newLevel);
-      Matter.Body.setVelocity(nb, { x: 0, y: -1.5 });
+      // 살짝 위로 통통 + 평균속도 일부 반영, 최대치 제한
+      const vx = Math.max(-3, Math.min(3, avgVx));
+      const vy = Math.max(-3, Math.min(1, avgVy - 1.2));
+      Matter.Body.setVelocity(nb, { x: vx, y: vy });
+      Matter.Body.setAngularVelocity(nb, 0);
+      // 갓 생성된 병합 body는 즉시 landed 처리 (이미 충돌 위치이므로)
+      nb.landed = true;
       Matter.World.add(this.world, nb);
     }
 
