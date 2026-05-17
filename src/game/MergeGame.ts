@@ -283,10 +283,12 @@ export class MergeGame {
     this.engine = Matter.Engine.create({ gravity: { x: 0, y: 1, scale: 0.0014 }, enableSleeping: true });
     this.world = this.engine.world;
     Matter.Events.on(this.engine, "collisionStart", (e) => this.onCollision(e));
+    Matter.Events.on(this.engine, "afterUpdate", () => this.afterPhysicsUpdate());
     Matter.Runner.run(this.runner, this.engine);
     this.addWalls();
     this.score = 0;
     this.gameOver = false;
+    this.gameOverTriggered = false;
     this.particles = [];
     this.popups = [];
     this.mergeChainCount = 0;
@@ -299,7 +301,53 @@ export class MergeGame {
     this.cb.onNext(this.nextLevel);
   }
 
+  // Matter afterUpdate: 매 물리 스텝마다 게임오버 판정 + 속도 클램프
+  private afterPhysicsUpdate() {
+    if (this.gameOverTriggered) return;
+    const bodies = Matter.Composite.allBodies(this.world);
+    for (const body of bodies) {
+      const fb = body as CharacterBody;
+      if (fb.characterLevel == null) continue;
+
+      // 1) 속도/각속도 클램프로 jitter 및 과한 튐 억제
+      const vx = fb.velocity.x;
+      const vy = fb.velocity.y;
+      const sp = Math.hypot(vx, vy);
+      if (sp > MAX_LINEAR_SPEED) {
+        const k = MAX_LINEAR_SPEED / sp;
+        Matter.Body.setVelocity(fb, { x: vx * k, y: vy * k });
+      }
+      const av = fb.angularVelocity;
+      if (Math.abs(av) > MAX_ANGULAR_SPEED) {
+        Matter.Body.setAngularVelocity(fb, Math.sign(av) * MAX_ANGULAR_SPEED);
+      }
+
+      // 2) 게임오버 판정: 착지(landed)된 활성 body만 검사,
+      //    bounds.min.y(콜라이더 상단) 기준 즉시 종료
+      if (!fb.landed) continue;
+      if (fb.bounds.min.y <= this.topLine) {
+        this.triggerGameOver();
+        return;
+      }
+    }
+  }
+
   private update(dt: number) {
+    if (this.gameOver) {
+      // 게임오버 후에는 점수/콤보/드롭 타이머 갱신 없이 시각 효과만 감쇠
+      for (const p of this.particles) {
+        p.x += p.vx; p.y += p.vy; p.vy += 0.15; p.vx *= 0.99; p.life -= dt;
+      }
+      this.particles = this.particles.filter((p) => p.life > 0);
+      for (const p of this.popups) {
+        p.y += p.vy; p.vy *= 0.96; p.life -= dt * 1.2;
+      }
+      this.popups = this.popups.filter((p) => p.life > 0);
+      this.shakeAmount *= 0.85;
+      this.flash *= 0.9;
+      return;
+    }
+
     if (this.dropCooldown > 0) {
       this.dropCooldown -= dt;
       if (this.dropCooldown <= 0) this.canDrop = true;
@@ -321,26 +369,6 @@ export class MergeGame {
 
     this.shakeAmount *= 0.85;
     this.flash *= 0.9;
-
-    if (!this.gameOver) {
-      const now = performance.now();
-      const bodies = Matter.Composite.allBodies(this.world);
-      for (const body of bodies) {
-        const fb = body as CharacterBody;
-        if (fb.characterLevel == null) continue;
-        if (now - fb.spawnTime < 1500) continue;
-        if (fb.position.y - CHARACTERS[fb.characterLevel].radius < this.topLine) {
-          const t0 = this.overLineSince.get(fb) ?? now;
-          this.overLineSince.set(fb, t0);
-          if (now - t0 > 1100) {
-            this.triggerGameOver();
-            break;
-          }
-        } else {
-          this.overLineSince.delete(fb);
-        }
-      }
-    }
   }
 
   private triggerGameOver() {
