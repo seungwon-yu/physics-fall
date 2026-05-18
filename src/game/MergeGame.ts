@@ -7,6 +7,7 @@ import {
   preloadCharacterImages,
   type CharacterStage,
 } from "./characters";
+import { difficultyConfig, physicsConfig } from "./config";
 import { playBounce, playDrop, playMerge, playCombo, playGameOver } from "./audio";
 
 export interface GameCallbacks {
@@ -25,11 +26,10 @@ interface CharacterBody extends Matter.Body {
   characterLevel: number;
   merged?: boolean;
   spawnTime: number;
-  landed?: boolean;
+  // stuck 감지용
+  stuckSampleTime?: number;
+  stuckSampleY?: number;
 }
-
-const MAX_LINEAR_SPEED = 14;
-const MAX_ANGULAR_SPEED = 0.4;
 
 export class MergeGame {
   private engine: Matter.Engine;
@@ -40,11 +40,12 @@ export class MergeGame {
   private width = 0;
   private height = 0;
   private wallThickness = 40;
-  private topLine = 110;
+  private topLine = difficultyConfig.gameOverLineY;
   private dpr = 1;
 
   private currentLevel = 0;
   private nextLevel = 0;
+  private spawnHistory: number[] = []; // 연속 같은 레벨 방지
   private dropX = 0;
   private canDrop = true;
   private dropCooldown = 0;
@@ -90,15 +91,34 @@ export class MergeGame {
     this.loop(performance.now());
   }
 
-  private rollNewLevel() {
-    const weights = [42, 30, 18, 10];
+  private rollNewLevel(): number {
+    const maxLv = Math.min(SPAWNABLE_MAX_LEVEL, difficultyConfig.spawnWeights.length - 1);
+    const weights = difficultyConfig.spawnWeights.slice(0, maxLv + 1);
     const total = weights.reduce((a, b) => a + b, 0);
-    let r = Math.random() * total;
-    for (let i = 0; i <= SPAWNABLE_MAX_LEVEL; i++) {
-      r -= weights[i];
-      if (r <= 0) return i;
+
+    const pick = () => {
+      let r = Math.random() * total;
+      for (let i = 0; i <= maxLv; i++) {
+        r -= weights[i];
+        if (r <= 0) return i;
+      }
+      return 0;
+    };
+
+    let lv = pick();
+    // 같은 레벨이 maxSameLevelStreak번 이상 연속으로 나오지 않게
+    const streak = difficultyConfig.maxSameLevelStreak;
+    const lastN = this.spawnHistory.slice(-streak);
+    if (lastN.length >= streak && lastN.every((l) => l === lv)) {
+      // 다른 레벨이 나올 때까지 최대 5회 재추첨
+      for (let i = 0; i < 5; i++) {
+        const alt = pick();
+        if (alt !== lv) { lv = alt; break; }
+      }
     }
-    return 0;
+    this.spawnHistory.push(lv);
+    if (this.spawnHistory.length > 8) this.spawnHistory.shift();
+    return lv;
   }
 
   resize() {
@@ -124,30 +144,51 @@ export class MergeGame {
   }
   private addWalls() {
     const t = this.wallThickness;
-    const opts = {
+    // 좌우 벽: 마찰 거의 0 → 절대 매달리지 않게
+    const sideOpts: Matter.IChamferableBodyDefinition = {
+      isStatic: true,
+      friction: physicsConfig.wallFriction,
+      frictionStatic: physicsConfig.wallFrictionStatic,
+      restitution: physicsConfig.wallRestitution,
+      slop: physicsConfig.slop,
+      render: { visible: false },
+    };
+    // 바닥은 살짝 더 잡아주기
+    const floorOpts: Matter.IChamferableBodyDefinition = {
       isStatic: true,
       friction: 0.6,
-      restitution: 0.1,
+      frictionStatic: 0.5,
+      restitution: 0.05,
+      slop: physicsConfig.slop,
       render: { visible: false },
-    } satisfies Matter.IChamferableBodyDefinition;
-    const floor = Matter.Bodies.rectangle(this.width / 2, this.height + t / 2 - 2, this.width, t, opts);
-    const left = Matter.Bodies.rectangle(-t / 2 + 2, this.height / 2, t, this.height * 2, opts);
-    const right = Matter.Bodies.rectangle(this.width + t / 2 - 2, this.height / 2, t, this.height * 2, opts);
+    };
+    const floor = Matter.Bodies.rectangle(this.width / 2, this.height + t / 2 - 2, this.width, t, floorOpts);
+    const left = Matter.Bodies.rectangle(-t / 2 + 2, this.height / 2, t, this.height * 2, sideOpts);
+    const right = Matter.Bodies.rectangle(this.width + t / 2 - 2, this.height / 2, t, this.height * 2, sideOpts);
     this.wallBodies = [floor, left, right];
     Matter.World.add(this.world, this.wallBodies);
+  }
+
+  private get leftBound() { return 0; }
+  private get rightBound() { return this.width; }
+
+  private clampSpawnX(x: number, radius: number, margin = 4) {
+    const min = this.leftBound + radius + margin;
+    const max = this.rightBound - radius - margin;
+    return Math.max(min, Math.min(max, x));
   }
 
   setDropX(x: number) {
     if (this.gameOver) return;
     const def = CHARACTERS[this.currentLevel];
-    const margin = def.radius + 4;
-    this.dropX = Math.max(margin, Math.min(this.width - margin, x));
+    this.dropX = this.clampSpawnX(x, def.radius, 4);
   }
 
   drop() {
     if (!this.canDrop || this.gameOver || this.paused) return;
     const def = CHARACTERS[this.currentLevel];
-    const body = this.makeCharacter(this.dropX, this.topLine - def.radius - 10, this.currentLevel);
+    const x = this.clampSpawnX(this.dropX, def.radius, 4);
+    const body = this.makeCharacter(x, this.topLine - def.radius - 10, this.currentLevel);
     Matter.World.add(this.world, body);
     playDrop();
     this.canDrop = false;
@@ -159,20 +200,17 @@ export class MergeGame {
 
   private makeCharacter(x: number, y: number, level: number): CharacterBody {
     const def = CHARACTERS[level];
-    // 안정성: 낮은 반발, 높은 마찰, 적당한 공기저항, 부드러운 slop
     const body = Matter.Bodies.circle(x, y, def.radius, {
-      restitution: 0.12,
-      friction: 0.75,
-      frictionStatic: 0.9,
-      frictionAir: 0.018,
-      // density 증가량을 완화하여 큰 객체가 작은 객체를 과하게 짓누르지 않도록
-      density: 0.0012 + level * 0.00015,
-      slop: 0.05,
-      sleepThreshold: 50,
+      restitution: physicsConfig.restitution,
+      friction: physicsConfig.friction,
+      frictionStatic: physicsConfig.frictionStatic,
+      frictionAir: physicsConfig.frictionAir,
+      density: physicsConfig.densityBase + level * physicsConfig.densityStep,
+      slop: physicsConfig.slop,
+      sleepThreshold: physicsConfig.sleepThreshold,
     }) as CharacterBody;
     body.characterLevel = level;
     body.spawnTime = performance.now();
-    body.landed = false;
     return body;
   }
 
@@ -182,12 +220,13 @@ export class MergeGame {
       const a = pair.bodyA as CharacterBody;
       const b = pair.bodyB as CharacterBody;
       const speed = Math.hypot(a.velocity.x - b.velocity.x, a.velocity.y - b.velocity.y);
-      // 첫 충돌 시점에 landed 표시 → 게임오버 판정 대상이 됨
-      if (a.characterLevel != null) a.landed = true;
-      if (b.characterLevel != null) b.landed = true;
       if (a.characterLevel != null && b.characterLevel != null) {
         if (speed > 1.5) playBounce(speed / 4);
-        if (!a.merged && !b.merged && a.characterLevel === b.characterLevel && a.characterLevel < MAX_LEVEL) {
+        if (
+          !a.merged && !b.merged &&
+          a.characterLevel === b.characterLevel &&
+          a.characterLevel < MAX_LEVEL // Lv.7끼리는 합체 안 함
+        ) {
           a.merged = true;
           b.merged = true;
           this.mergeCharacters(a, b);
@@ -201,24 +240,23 @@ export class MergeGame {
   private mergeCharacters(a: CharacterBody, b: CharacterBody) {
     if (this.gameOver) return;
     const newLevel = a.characterLevel + 1;
-    const mx = (a.position.x + b.position.x) / 2;
+    let mx = (a.position.x + b.position.x) / 2;
     const my = (a.position.y + b.position.y) / 2;
-    // 병합 직전 평균 속도의 일부만 계승하여 튐 억제
-    const avgVx = (a.velocity.x + b.velocity.x) * 0.5 * 0.25;
-    const avgVy = (a.velocity.y + b.velocity.y) * 0.5 * 0.25;
+    const scale = physicsConfig.mergeVelocityScale;
+    const avgVx = (a.velocity.x + b.velocity.x) * 0.5 * scale;
+    const avgVy = (a.velocity.y + b.velocity.y) * 0.5 * scale;
     Matter.World.remove(this.world, a);
     Matter.World.remove(this.world, b);
 
-    const isMax = newLevel > MAX_LEVEL;
-    if (!isMax) {
+    if (newLevel <= MAX_LEVEL) {
+      const def = CHARACTERS[newLevel];
+      // 벽 안쪽으로 보정 (병합 직후 새 body가 벽에 끼지 않게)
+      mx = this.clampSpawnX(mx, def.radius, 3);
       const nb = this.makeCharacter(mx, my, newLevel);
-      // 살짝 위로 통통 + 평균속도 일부 반영, 최대치 제한
-      const vx = Math.max(-3, Math.min(3, avgVx));
-      const vy = Math.max(-3, Math.min(1, avgVy - 1.2));
+      const vx = Math.max(-physicsConfig.mergeMaxVx, Math.min(physicsConfig.mergeMaxVx, avgVx));
+      const vy = Math.max(-physicsConfig.mergeMaxVy, Math.min(physicsConfig.mergeMaxVy, avgVy + physicsConfig.mergeBouncePopY));
       Matter.Body.setVelocity(nb, { x: vx, y: vy });
       Matter.Body.setAngularVelocity(nb, 0);
-      // 갓 생성된 병합 body는 즉시 landed 처리 (이미 충돌 위치이므로)
-      nb.landed = true;
       Matter.World.add(this.world, nb);
     }
 
@@ -291,6 +329,7 @@ export class MergeGame {
     this.gameOverTriggered = false;
     this.particles = [];
     this.popups = [];
+    this.spawnHistory = [];
     this.mergeChainCount = 0;
     this.mergeChainTimer = 0;
     this.currentLevel = this.rollNewLevel();
@@ -301,40 +340,80 @@ export class MergeGame {
     this.cb.onNext(this.nextLevel);
   }
 
-  // Matter afterUpdate: 매 물리 스텝마다 게임오버 판정 + 속도 클램프
+  // 매 물리 스텝: 속도 클램프 + 게임오버 판정 + stuck 보정
   private afterPhysicsUpdate() {
     if (this.gameOverTriggered) return;
+    const now = performance.now();
     const bodies = Matter.Composite.allBodies(this.world);
     for (const body of bodies) {
       const fb = body as CharacterBody;
       if (fb.characterLevel == null) continue;
 
-      // 1) 속도/각속도 클램프로 jitter 및 과한 튐 억제
+      // 1) 속도/각속도 클램프
       const vx = fb.velocity.x;
       const vy = fb.velocity.y;
       const sp = Math.hypot(vx, vy);
-      if (sp > MAX_LINEAR_SPEED) {
-        const k = MAX_LINEAR_SPEED / sp;
+      if (sp > physicsConfig.maxVelocity) {
+        const k = physicsConfig.maxVelocity / sp;
         Matter.Body.setVelocity(fb, { x: vx * k, y: vy * k });
       }
       const av = fb.angularVelocity;
-      if (Math.abs(av) > MAX_ANGULAR_SPEED) {
-        Matter.Body.setAngularVelocity(fb, Math.sign(av) * MAX_ANGULAR_SPEED);
+      if (Math.abs(av) > physicsConfig.maxAngularVelocity) {
+        Matter.Body.setAngularVelocity(fb, Math.sign(av) * physicsConfig.maxAngularVelocity);
       }
 
-      // 2) 게임오버 판정: 착지(landed)된 활성 body만 검사,
-      //    bounds.min.y(콜라이더 상단) 기준 즉시 종료
-      if (!fb.landed) continue;
-      if (fb.bounds.min.y <= this.topLine) {
-        this.triggerGameOver();
-        return;
+      // 2) 스폰 직후 짧은 유예 후 게임오버 판정 (bounds 기준)
+      const age = now - fb.spawnTime;
+      if (age >= difficultyConfig.spawnGraceMs) {
+        if (fb.bounds.min.y <= this.topLine) {
+          this.triggerGameOver();
+          return;
+        }
+      }
+
+      // 3) 벽 끼임(stuck) 감지 및 부드러운 보정
+      if (physicsConfig.stuckDetectionEnabled && age > 500) {
+        this.handleStuck(fb, now);
       }
     }
   }
 
+  private handleStuck(fb: CharacterBody, now: number) {
+    const def = CHARACTERS[fb.characterLevel];
+    const touchingLeft = fb.bounds.min.x <= this.leftBound + physicsConfig.stuckWallContactPx;
+    const touchingRight = fb.bounds.max.x >= this.rightBound - physicsConfig.stuckWallContactPx;
+    const onFloor = fb.bounds.max.y >= this.height - 2;
+
+    if (!(touchingLeft || touchingRight) || onFloor) {
+      fb.stuckSampleTime = undefined;
+      return;
+    }
+
+    if (fb.stuckSampleTime == null) {
+      fb.stuckSampleTime = now;
+      fb.stuckSampleY = fb.position.y;
+      return;
+    }
+
+    if (now - fb.stuckSampleTime < physicsConfig.stuckDetectionTimeMs) return;
+
+    const dy = Math.abs(fb.position.y - (fb.stuckSampleY ?? fb.position.y));
+    if (dy < physicsConfig.stuckMinYDelta) {
+      // 벽에서 살짝 떼어내고 아래로 톡
+      const pushX = touchingLeft ? def.radius * 0.05 : -def.radius * 0.05;
+      Matter.Body.setVelocity(fb, {
+        x: fb.velocity.x * 0.5 + pushX,
+        y: Math.max(fb.velocity.y, 0.6),
+      });
+      Matter.Body.applyForce(fb, fb.position, { x: 0, y: physicsConfig.stuckCorrectionForceY * fb.mass });
+    }
+
+    fb.stuckSampleTime = now;
+    fb.stuckSampleY = fb.position.y;
+  }
+
   private update(dt: number) {
     if (this.gameOver) {
-      // 게임오버 후에는 점수/콤보/드롭 타이머 갱신 없이 시각 효과만 감쇠
       for (const p of this.particles) {
         p.x += p.vx; p.y += p.vy; p.vy += 0.15; p.vx *= 0.99; p.life -= dt;
       }
@@ -376,7 +455,6 @@ export class MergeGame {
     this.gameOverTriggered = true;
     this.gameOver = true;
     this.canDrop = false;
-    // 모든 캐릭터 body 정지 + 물리 일시정지
     const bodies = Matter.Composite.allBodies(this.world);
     for (const body of bodies) {
       const fb = body as CharacterBody;
@@ -397,7 +475,6 @@ export class MergeGame {
     ctx.save();
     ctx.translate(x, y);
 
-    // 그림자
     ctx.beginPath();
     ctx.fillStyle = "rgba(0,0,0,0.28)";
     ctx.ellipse(2, 3, r, r, 0, 0, Math.PI * 2);
@@ -405,7 +482,6 @@ export class MergeGame {
 
     const img = getCharacterImage(def.imagePath);
     if (img) {
-      // 원형 클립 후 이미지
       ctx.save();
       ctx.beginPath();
       ctx.arc(0, 0, r, 0, Math.PI * 2);
@@ -414,14 +490,12 @@ export class MergeGame {
       ctx.rotate(angle);
       ctx.drawImage(img, -r, -r, r * 2, r * 2);
       ctx.restore();
-      // 외곽
       ctx.beginPath();
       ctx.arc(0, 0, r, 0, Math.PI * 2);
       ctx.lineWidth = 2;
       ctx.strokeStyle = "rgba(255,255,255,0.6)";
       ctx.stroke();
     } else {
-      // 색상 fallback
       const grad = ctx.createRadialGradient(-r * 0.3, -r * 0.4, r * 0.1, 0, 0, r);
       grad.addColorStop(0, def.highlight);
       grad.addColorStop(0.6, def.color);
@@ -453,7 +527,6 @@ export class MergeGame {
     ctx.translate(sx, sy);
     ctx.clearRect(-20, -20, this.width + 40, this.height + 40);
 
-    // 우주 느낌 컨테이너 패널
     ctx.fillStyle = "rgba(255,255,255,0.06)";
     ctx.beginPath();
     const r = 18;
@@ -467,7 +540,6 @@ export class MergeGame {
     ctx.quadraticCurveTo(x, y, x + r, y);
     ctx.fill();
 
-    // 위험선
     ctx.setLineDash([8, 6]);
     ctx.strokeStyle = "rgba(255, 120, 180, 0.55)";
     ctx.lineWidth = 2;
@@ -477,7 +549,6 @@ export class MergeGame {
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // 드롭 가이드
     if (!this.gameOver && this.canDrop) {
       const def = CHARACTERS[this.currentLevel];
       ctx.strokeStyle = "rgba(255,255,255,0.18)";
@@ -491,7 +562,6 @@ export class MergeGame {
       ctx.globalAlpha = 1;
     }
 
-    // 캐릭터
     const bodies = Matter.Composite.allBodies(this.world);
     for (const b of bodies) {
       const fb = b as CharacterBody;
@@ -499,7 +569,6 @@ export class MergeGame {
       this.drawCharacter(fb.characterLevel, fb.position.x, fb.position.y, fb.angle);
     }
 
-    // 파티클
     for (const p of this.particles) {
       ctx.globalAlpha = Math.max(0, p.life / p.max);
       ctx.fillStyle = p.color;
@@ -509,7 +578,6 @@ export class MergeGame {
     }
     ctx.globalAlpha = 1;
 
-    // 팝업
     for (const p of this.popups) {
       ctx.globalAlpha = Math.max(0, p.life);
       ctx.fillStyle = p.color;
