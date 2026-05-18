@@ -67,17 +67,19 @@ const stages: Omit<CharacterStage, "level" | "radius" | "mass" | "score">[] = [
   },
 ];
 
+import { difficultyConfig } from "./config";
+
 export const CHARACTERS: CharacterStage[] = stages.map((s, i) => ({
   ...s,
   level: i,
-  radius: 20 + i * 10,
+  radius: difficultyConfig.radiusByLevel[i] ?? 20 + i * 12,
   mass: 0.001 + i * 0.0003,
   score: (i + 1) * (i + 2), // 2, 6, 12, 20, 30, 42, 56
 }));
 
 export const MAX_LEVEL = CHARACTERS.length - 1;
-// 위에서 떨어뜨릴 수 있는 최대 레벨 (Lv.1 ~ Lv.4)
-export const SPAWNABLE_MAX_LEVEL = 3;
+// 위에서 떨어뜨릴 수 있는 최대 레벨 (난이도 설정에서 가져옴)
+export const SPAWNABLE_MAX_LEVEL = difficultyConfig.maxSpawnLevel;
 
 // 이미지 캐시 + 비동기 로더
 const imageCache = new Map<string, HTMLImageElement>();
